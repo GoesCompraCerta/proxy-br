@@ -11,7 +11,7 @@ const MAX_REDIRECTS = 5;
 const MAX_HTML_BYTES = 1_000_000;
 const REQUEST_TIMEOUT_MS = 8_000;
 const USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1';
 
 function isAllowedShopeeUrl(value) {
   let url;
@@ -122,6 +122,8 @@ export default async function handler(req, res) {
     return res.status(200).json({
       serverRegion: process.env.VERCEL_REGION ?? 'gru1',
       shopeeHTTP: response.status,
+      debug_url: url.toString(),
+      debug_html_snippet: html.substring(0, 300),
       imageUrl: getOgImage(html, url)
     });
   } catch (error) {
