@@ -102,6 +102,47 @@ test('rejects Amazon home pages and short links as product URLs', () => {
   );
 });
 
+test('resolves amzlink.to and amzlink.com short links through the proxy', async () => {
+  const originalFetch = globalThis.fetch;
+  const productUrl = 'https://www.amazon.com.br/dp/B0ABCDEFGH';
+  globalThis.fetch = async (input) => {
+    const requestUrl = new URL(String(input));
+    assert.ok(['amzlink.to', 'amzlink.com'].includes(requestUrl.hostname));
+    return new Response(
+      `<meta property="og:url" content="${productUrl}">`,
+      { status: 200, headers: { 'content-type': 'text/html' } }
+    );
+  };
+
+  try {
+    for (const host of ['amzlink.to', 'amzlink.com']) {
+      let payload;
+      const res = {
+        setHeader() {},
+        status(code) {
+          assert.equal(code, 200);
+          return this;
+        },
+        json(value) {
+          payload = value;
+          return this;
+        },
+        end() {
+          return this;
+        }
+      };
+      await handler({
+        method: 'GET',
+        query: { url: `https://${host}/example` }
+      }, res);
+      assert.equal(payload.debug_url, productUrl);
+      assert.equal(payload.shopeeHTTP, 200);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('extracts Magalu product URLs from og:url, canonical, and product links', () => {
   const expected = 'https://www.magazineluiza.com.br/p/produto/123';
   assert.equal(

@@ -11,6 +11,8 @@ const ALLOWED_HOSTS = [
   'amzn.to',
   'amzn.com',
   'a.co',
+  'amzlink.to',
+  'amzlink.com',
   'magazineluiza.com.br',
   'magazinevoce.com.br',
   'divulgador.magalu.com',
@@ -30,7 +32,7 @@ const SHORT_HOSTS = new Set([
   'shp.ee',
   'sho.pe'
 ]);
-const AMAZON_SHORT_HOSTS = new Set(['amzn.to', 'amzn.com', 'a.co']);
+const AMAZON_SHORT_HOSTS = new Set(['amzn.to', 'amzn.com', 'a.co', 'amzlink.to', 'amzlink.com']);
 const MAGALU_SHORT_HOSTS = new Set([
   'divulgador.magalu.com',
   'magalu.me',
