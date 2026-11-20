@@ -8,7 +8,15 @@ const ALLOWED_HOSTS = [
   'sho.pe'
 ];
 const MAX_REDIRECTS = 5;
-const MAX_HTML_BYTES = 1_000_000;
+const MAX_HTML_BYTES = 500 * 1024;
+const SHORT_HOSTS = new Set([
+  'shopee.promo',
+  's.shopee.com.br',
+  'shopee.ee',
+  'shope.ee',
+  'shp.ee',
+  'sho.pe'
+]);
 const REQUEST_TIMEOUT_MS = 8_000;
 const USER_AGENT =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1';
@@ -50,6 +58,94 @@ async function readHtml(response) {
 function getAttribute(tag, name) {
   const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return tag.match(new RegExp(`\\b${escapedName}\\s*=\\s*(["'])(.*?)\\1`, 'i'))?.[2];
+}
+
+function decodeCandidate(value) {
+  let decoded = value
+    .trim()
+    .replace(/^["']|["']$/g, '')
+    .replace(/&amp;/gi, '&')
+    .replace(/&#x26;?/gi, '&')
+    .replace(/&#38;?/g, '&')
+    .replace(/\\u0026/gi, '&')
+    .replace(/\\\//g, '/');
+  try {
+    decoded = decodeURIComponent(decoded);
+  } catch {
+    // Keep the candidate unchanged if it contains malformed percent-encoding.
+  }
+  return decoded;
+}
+
+function isShopeeShortUrl(value) {
+  try {
+    return SHORT_HOSTS.has(new URL(value).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function isShopeeProductUrl(value) {
+  let url;
+  try {
+    url = new URL(decodeCandidate(value));
+  } catch {
+    return false;
+  }
+  if (
+    url.protocol !== 'https:' ||
+    !['shopee.com.br', 'www.shopee.com.br'].includes(url.hostname.toLowerCase()) ||
+    isShopeeShortUrl(url.toString())
+  ) return false;
+
+  return /-i\.\d+\.\d+(?:\/|$)/i.test(url.pathname) ||
+    /^\/(?:product|opaanlp)\/\d+\/\d+(?:\/|$)/i.test(url.pathname);
+}
+
+export function extractShopeeUrlFromHtml(html) {
+  const candidates = [];
+  const configUrl = html.match(
+    /\bCONFIG\s*=\s*\{[\s\S]{0,20000}?\bhttpUrl\s*:\s*(["'])(.*?)\1/i
+  )?.[2];
+  if (configUrl) candidates.push(configUrl);
+
+  for (const match of html.matchAll(/<meta\b[^>]*>/gi)) {
+    const tag = match[0];
+    const property = getAttribute(tag, 'property')?.toLowerCase();
+    const name = getAttribute(tag, 'name')?.toLowerCase();
+    if (property === 'og:url' || name === 'og:url') {
+      const content = getAttribute(tag, 'content');
+      if (content) candidates.push(content);
+    }
+  }
+
+  for (const match of html.matchAll(/<link\b[^>]*>/gi)) {
+    const tag = match[0];
+    const rel = getAttribute(tag, 'rel')?.toLowerCase().split(/\s+/) ?? [];
+    const href = getAttribute(tag, 'href');
+    if (rel.includes('canonical') && href) candidates.push(href);
+  }
+
+  for (const match of html.matchAll(/<meta\b[^>]*>/gi)) {
+    const tag = match[0];
+    if (getAttribute(tag, 'http-equiv')?.toLowerCase() !== 'refresh') continue;
+    const content = getAttribute(tag, 'content');
+    const refreshUrl = content?.match(
+      /\burl\s*=\s*(?:"([^"]+)"|'([^']+)'|([^;]+))/i
+    );
+    const candidate = refreshUrl?.[1] ?? refreshUrl?.[2] ?? refreshUrl?.[3];
+    if (candidate) candidates.push(candidate);
+  }
+
+  for (const match of html.matchAll(/https?:[^\s"'<>]+/gi)) {
+    candidates.push(match[0]);
+  }
+
+  for (const candidate of candidates) {
+    const decoded = decodeCandidate(candidate);
+    if (isShopeeProductUrl(decoded)) return new URL(decoded).toString();
+  }
+  return null;
 }
 
 function getOgImage(html, pageUrl) {
@@ -119,10 +215,13 @@ export default async function handler(req, res) {
   try {
     const { response, url } = await fetchShopeePage(rawUrl, controller.signal);
     const html = await readHtml(response);
+    const extractedUrl = isShopeeShortUrl(url.toString())
+      ? extractShopeeUrlFromHtml(html)
+      : null;
     return res.status(200).json({
       serverRegion: process.env.VERCEL_REGION ?? 'gru1',
       shopeeHTTP: response.status,
-      debug_url: url.toString(),
+      debug_url: extractedUrl ?? url.toString(),
       debug_html_snippet: html.substring(0, 300),
       imageUrl: getOgImage(html, url)
     });
