@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { extractAmazonProductUrlFromHtml, extractShopeeUrlFromHtml } from './proxy.js';
+import handler, {
+  extractAmazonProductUrlFromHtml,
+  extractMagaluProductUrlFromHtml,
+  extractShopeeUrlFromHtml
+} from './proxy.js';
 
 const productUrl =
   'https://shopee.com.br/opaanlp/402093902/23793620725?__mobile__=1&x=1';
@@ -96,4 +100,95 @@ test('rejects Amazon home pages and short links as product URLs', () => {
     extractAmazonProductUrlFromHtml('<html><body>No product link</body></html>'),
     null
   );
+});
+
+test('extracts Magalu product URLs from og:url, canonical, and product links', () => {
+  const expected = 'https://www.magazineluiza.com.br/p/produto/123';
+  assert.equal(
+    extractMagaluProductUrlFromHtml(
+      `<meta property="og:url" content="${expected}?utm_source=old">`
+    ),
+    `${expected}?utm_source=old`
+  );
+  assert.equal(
+    extractMagaluProductUrlFromHtml(
+      `<link rel="canonical" href="${expected}">`
+    ),
+    expected
+  );
+  assert.equal(
+    extractMagaluProductUrlFromHtml(
+      `<a href="${expected}">Produto</a>`
+    ),
+    expected
+  );
+});
+
+test('extracts escaped Magalu product URLs from HTML metadata', () => {
+  assert.equal(
+    extractMagaluProductUrlFromHtml(
+      String.raw`<meta property="og:url" content="https:\/\/www.magazinevoce.com.br\/magazineLoja\/p\/item?x=1\u0026y=2">`
+    ),
+    'https://www.magazinevoce.com.br/magazineLoja/p/item?x=1&y=2'
+  );
+});
+
+test('rejects Magalu home pages, short links, and non-Magalu URLs', () => {
+  assert.equal(
+    extractMagaluProductUrlFromHtml(
+      '<meta property="og:url" content="https://www.magazineluiza.com.br/">'
+    ),
+    null
+  );
+  assert.equal(
+    extractMagaluProductUrlFromHtml(
+      '<meta property="og:url" content="https://divulgador.magalu.com/short">'
+    ),
+    null
+  );
+  assert.equal(
+    extractMagaluProductUrlFromHtml(
+      '<a href="https://example.com/p/produto">Produto</a>'
+    ),
+    null
+  );
+});
+
+test('Magalu short-link HTML fallback preserves the proxy response shape', async () => {
+  const originalFetch = globalThis.fetch;
+  const productUrl = 'https://www.magazineluiza.com.br/p/produto/123';
+  globalThis.fetch = async () => new Response(
+    `<link rel="canonical" href="${productUrl}">`,
+    { status: 200, headers: { 'content-type': 'text/html' } }
+  );
+  let responseStatus = 0;
+  let payload;
+  const res = {
+    setHeader() {},
+    status(code) {
+      responseStatus = code;
+      return this;
+    },
+    json(value) {
+      payload = value;
+      return this;
+    },
+    end() {
+      return this;
+    }
+  };
+  try {
+    await handler({
+      method: 'GET',
+      query: { url: 'https://divulgador.magalu.com/short' }
+    }, res);
+    assert.equal(responseStatus, 200);
+    assert.equal(payload.debug_url, productUrl);
+    assert.equal(payload.shopeeHTTP, 200);
+    assert.ok(Object.hasOwn(payload, 'serverRegion'));
+    assert.ok(Object.hasOwn(payload, 'debug_html_snippet'));
+    assert.ok(Object.hasOwn(payload, 'imageUrl'));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

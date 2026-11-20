@@ -10,11 +10,18 @@ const ALLOWED_HOSTS = [
   'amazon.com',
   'amzn.to',
   'amzn.com',
-  'a.co'
+  'a.co',
+  'magazineluiza.com.br',
+  'magazinevoce.com.br',
+  'divulgador.magalu.com',
+  'magalu.me',
+  'maga.lu',
+  'magalu.com.br'
 ];
 const MAX_REDIRECTS = 5;
 const MAX_HTML_BYTES = 500 * 1024;
 const MAX_AMAZON_HTML_BYTES = 1024 * 1024;
+const MAX_MAGALU_HTML_BYTES = 1024 * 1024;
 const SHORT_HOSTS = new Set([
   'shopee.promo',
   's.shopee.com.br',
@@ -24,6 +31,17 @@ const SHORT_HOSTS = new Set([
   'sho.pe'
 ]);
 const AMAZON_SHORT_HOSTS = new Set(['amzn.to', 'amzn.com', 'a.co']);
+const MAGALU_SHORT_HOSTS = new Set([
+  'divulgador.magalu.com',
+  'magalu.me',
+  'maga.lu'
+]);
+const MAGALU_PRODUCT_HOSTS = new Set([
+  'magazineluiza.com.br',
+  'www.magazineluiza.com.br',
+  'magazinevoce.com.br',
+  'www.magazinevoce.com.br'
+]);
 const REQUEST_TIMEOUT_MS = 8_000;
 const USER_AGENT =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1';
@@ -169,6 +187,65 @@ export function extractAmazonProductUrlFromHtml(html) {
   return null;
 }
 
+function isMagaluShortUrl(value) {
+  try {
+    return MAGALU_SHORT_HOSTS.has(new URL(value).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function isMagaluProductUrl(value) {
+  let url;
+  try {
+    url = new URL(decodeCandidate(value));
+  } catch {
+    return false;
+  }
+  if (
+    url.protocol !== 'https:' ||
+    !MAGALU_PRODUCT_HOSTS.has(url.hostname.toLowerCase()) ||
+    isMagaluShortUrl(url.toString())
+  ) return false;
+
+  return url.pathname.split('/').some((segment) => segment.toLowerCase() === 'p');
+}
+
+export function extractMagaluProductUrlFromHtml(html) {
+  const candidates = [];
+  for (const match of html.matchAll(/<meta\b[^>]*>/gi)) {
+    const tag = match[0];
+    const property = getAttribute(tag, 'property')?.toLowerCase();
+    const name = getAttribute(tag, 'name')?.toLowerCase();
+    if (property === 'og:url' || name === 'og:url') {
+      const content = getAttribute(tag, 'content');
+      if (content) candidates.push(content);
+    }
+  }
+
+  for (const match of html.matchAll(/<link\b[^>]*>/gi)) {
+    const tag = match[0];
+    const rel = getAttribute(tag, 'rel')?.toLowerCase().split(/\s+/) ?? [];
+    const href = getAttribute(tag, 'href');
+    if (rel.includes('canonical') && href) candidates.push(href);
+  }
+
+  for (const match of html.matchAll(/<a\b[^>]*>/gi)) {
+    const href = getAttribute(match[0], 'href');
+    if (href) candidates.push(href);
+  }
+
+  for (const match of html.matchAll(/https?:[^\s"'<>]+/gi)) {
+    candidates.push(match[0]);
+  }
+
+  for (const candidate of candidates) {
+    const decoded = decodeCandidate(candidate);
+    if (isMagaluProductUrl(decoded)) return new URL(decoded).toString();
+  }
+  return null;
+}
+
 export function extractShopeeUrlFromHtml(html) {
   const candidates = [];
   const configUrl = html.match(
@@ -274,7 +351,9 @@ export default async function handler(req, res) {
   const rawUrl = typeof req.query?.url === 'string' ? req.query.url : '';
   if (!rawUrl) return res.status(400).json({ error: 'missing url' });
   if (!isAllowedShopeeUrl(rawUrl)) {
-    return res.status(400).json({ error: 'url must be an HTTPS Shopee or Amazon link' });
+    return res.status(400).json({
+      error: 'url must be an HTTPS Shopee, Amazon or Magalu link'
+    });
   }
 
   const controller = new AbortController();
@@ -282,14 +361,19 @@ export default async function handler(req, res) {
   try {
     const { response, url } = await fetchShopeePage(rawUrl, controller.signal);
     const amazonShortRequest = isAmazonShortUrl(rawUrl);
+    const magaluShortRequest = isMagaluShortUrl(rawUrl);
     const html = amazonShortRequest
       ? await readHtml(response, MAX_AMAZON_HTML_BYTES, true)
-      : await readHtml(response);
+      : magaluShortRequest
+        ? await readHtml(response, MAX_MAGALU_HTML_BYTES, true)
+        : await readHtml(response);
     const extractedUrl = isShopeeShortUrl(url.toString())
       ? extractShopeeUrlFromHtml(html)
       : isAmazonShortUrl(url.toString())
         ? extractAmazonProductUrlFromHtml(html)
-        : null;
+        : isMagaluShortUrl(url.toString())
+          ? extractMagaluProductUrlFromHtml(html)
+          : null;
     return res.status(200).json({
       serverRegion: process.env.VERCEL_REGION ?? 'gru1',
       shopeeHTTP: response.status,
