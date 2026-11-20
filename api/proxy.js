@@ -5,10 +5,16 @@ const ALLOWED_HOSTS = [
   'shopee.promo',
   'shopee.ee',
   'shp.ee',
-  'sho.pe'
+  'sho.pe',
+  'amazon.com.br',
+  'amazon.com',
+  'amzn.to',
+  'amzn.com',
+  'a.co'
 ];
 const MAX_REDIRECTS = 5;
 const MAX_HTML_BYTES = 500 * 1024;
+const MAX_AMAZON_HTML_BYTES = 1024 * 1024;
 const SHORT_HOSTS = new Set([
   'shopee.promo',
   's.shopee.com.br',
@@ -17,6 +23,7 @@ const SHORT_HOSTS = new Set([
   'shp.ee',
   'sho.pe'
 ]);
+const AMAZON_SHORT_HOSTS = new Set(['amzn.to', 'amzn.com', 'a.co']);
 const REQUEST_TIMEOUT_MS = 8_000;
 const USER_AGENT =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1';
@@ -32,7 +39,7 @@ function isAllowedShopeeUrl(value) {
     ALLOWED_HOSTS.some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`));
 }
 
-async function readHtml(response) {
+async function readHtml(response, maxBytes = MAX_HTML_BYTES, truncateAtLimit = false) {
   const reader = response.body?.getReader();
   if (!reader) throw new Error('Shopee returned an empty response');
 
@@ -42,11 +49,17 @@ async function readHtml(response) {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      size += value.byteLength;
-      if (size > MAX_HTML_BYTES) {
+      if (size + value.byteLength > maxBytes) {
+        if (truncateAtLimit) {
+          chunks.push(value.subarray(0, maxBytes - size));
+          size = maxBytes;
+          await reader.cancel();
+          break;
+        }
         await reader.cancel();
         throw new Error('Shopee HTML response exceeded the size limit');
       }
+      size += value.byteLength;
       chunks.push(value);
     }
   } finally {
@@ -100,6 +113,60 @@ function isShopeeProductUrl(value) {
 
   return /-i\.\d+\.\d+(?:\/|$)/i.test(url.pathname) ||
     /^\/(?:product|opaanlp)\/\d+\/\d+(?:\/|$)/i.test(url.pathname);
+}
+
+function isAmazonShortUrl(value) {
+  try {
+    return AMAZON_SHORT_HOSTS.has(new URL(value).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function isAmazonProductUrl(value) {
+  let url;
+  try {
+    url = new URL(decodeCandidate(value));
+  } catch {
+    return false;
+  }
+  if (
+    url.protocol !== 'https:' ||
+    !['amazon.com.br', 'www.amazon.com.br'].includes(url.hostname.toLowerCase()) ||
+    isAmazonShortUrl(url.toString())
+  ) return false;
+
+  return /\/(?:dp|gp\/product|gp\/aw\/d)\/[A-Z0-9]{10}(?:\/|$)/i.test(url.pathname);
+}
+
+export function extractAmazonProductUrlFromHtml(html) {
+  const candidates = [];
+  for (const match of html.matchAll(/<meta\b[^>]*>/gi)) {
+    const tag = match[0];
+    const property = getAttribute(tag, 'property')?.toLowerCase();
+    const name = getAttribute(tag, 'name')?.toLowerCase();
+    if (property === 'og:url' || name === 'og:url') {
+      const content = getAttribute(tag, 'content');
+      if (content) candidates.push(content);
+    }
+  }
+
+  for (const match of html.matchAll(/<link\b[^>]*>/gi)) {
+    const tag = match[0];
+    const rel = getAttribute(tag, 'rel')?.toLowerCase().split(/\s+/) ?? [];
+    const href = getAttribute(tag, 'href');
+    if (rel.includes('canonical') && href) candidates.push(href);
+  }
+
+  for (const match of html.matchAll(/https?:[^\s"'<>]+/gi)) {
+    candidates.push(match[0]);
+  }
+
+  for (const candidate of candidates) {
+    const decoded = decodeCandidate(candidate);
+    if (isAmazonProductUrl(decoded)) return new URL(decoded).toString();
+  }
+  return null;
 }
 
 export function extractShopeeUrlFromHtml(html) {
@@ -207,17 +274,22 @@ export default async function handler(req, res) {
   const rawUrl = typeof req.query?.url === 'string' ? req.query.url : '';
   if (!rawUrl) return res.status(400).json({ error: 'missing url' });
   if (!isAllowedShopeeUrl(rawUrl)) {
-    return res.status(400).json({ error: 'url must be an HTTPS Shopee link' });
+    return res.status(400).json({ error: 'url must be an HTTPS Shopee or Amazon link' });
   }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     const { response, url } = await fetchShopeePage(rawUrl, controller.signal);
-    const html = await readHtml(response);
+    const amazonShortRequest = isAmazonShortUrl(rawUrl);
+    const html = amazonShortRequest
+      ? await readHtml(response, MAX_AMAZON_HTML_BYTES, true)
+      : await readHtml(response);
     const extractedUrl = isShopeeShortUrl(url.toString())
       ? extractShopeeUrlFromHtml(html)
-      : null;
+      : isAmazonShortUrl(url.toString())
+        ? extractAmazonProductUrlFromHtml(html)
+        : null;
     return res.status(200).json({
       serverRegion: process.env.VERCEL_REGION ?? 'gru1',
       shopeeHTTP: response.status,

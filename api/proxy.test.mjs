@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { extractShopeeUrlFromHtml } from './proxy.js';
+import { extractAmazonProductUrlFromHtml, extractShopeeUrlFromHtml } from './proxy.js';
 
 const productUrl =
   'https://shopee.com.br/opaanlp/402093902/23793620725?__mobile__=1&x=1';
@@ -57,4 +57,43 @@ test('rejects Shopee home page and short URL', () => {
 
 test('returns null when the page contains no product URL', () => {
   assert.equal(extractShopeeUrlFromHtml('<html><body>No product link</body></html>'), null);
+});
+
+test('extracts Amazon product URLs from og:url and canonical metadata', () => {
+  assert.equal(
+    extractAmazonProductUrlFromHtml(
+      '<meta property="og:url" content="https://www.amazon.com.br/dp/B0ABCDEFGH?ref_=share">'
+    ),
+    'https://www.amazon.com.br/dp/B0ABCDEFGH?ref_=share'
+  );
+  assert.equal(
+    extractAmazonProductUrlFromHtml(
+      '<link rel="canonical" href="https://www.amazon.com.br/gp/product/B0ABCDEFGH">'
+    ),
+    'https://www.amazon.com.br/gp/product/B0ABCDEFGH'
+  );
+});
+
+test('extracts escaped Amazon product URLs from scripts', () => {
+  assert.equal(
+    extractAmazonProductUrlFromHtml(
+      String.raw`<script>{"url":"https:\/\/www.amazon.com.br\/dp\/B0ABCDEFGH?tag=old-20\u0026ref_=share"}</script>`
+    ),
+    'https://www.amazon.com.br/dp/B0ABCDEFGH?tag=old-20&ref_=share'
+  );
+});
+
+test('rejects Amazon home pages and short links as product URLs', () => {
+  assert.equal(
+    extractAmazonProductUrlFromHtml('<meta property="og:url" content="https://www.amazon.com.br/">'),
+    null
+  );
+  assert.equal(
+    extractAmazonProductUrlFromHtml('<meta property="og:url" content="https://amzn.to/3example">'),
+    null
+  );
+  assert.equal(
+    extractAmazonProductUrlFromHtml('<html><body>No product link</body></html>'),
+    null
+  );
 });
