@@ -11,6 +11,7 @@ const ALLOWED_HOSTS = [
   'amzn.to',
   'amzn.com',
   'a.co',
+  'amzn.divulgador.link',
   'amzlink.to',
   'amzlink.com',
   'magazineluiza.com.br',
@@ -32,7 +33,15 @@ const SHORT_HOSTS = new Set([
   'shp.ee',
   'sho.pe'
 ]);
-const AMAZON_SHORT_HOSTS = new Set(['amzn.to', 'amzn.com', 'a.co', 'amzlink.to', 'amzlink.com']);
+const AMAZON_SHORT_HOSTS = new Set([
+  'amzn.to',
+  'amzn.com',
+  'a.co',
+  'amzlink.to',
+  'amzlink.com',
+  'amzn.divulgador.link'
+]);
+const EXACT_ALLOWED_HOSTS = new Set(['amzn.divulgador.link']);
 const MAGALU_SHORT_HOSTS = new Set([
   'divulgador.magalu.com',
   'magalu.me',
@@ -55,8 +64,12 @@ function isAllowedShopeeUrl(value) {
   } catch {
     return false;
   }
+  const hostname = url.hostname.toLowerCase();
   return url.protocol === 'https:' &&
-    ALLOWED_HOSTS.some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`));
+    ALLOWED_HOSTS.some((host) =>
+      hostname === host ||
+      (!EXACT_ALLOWED_HOSTS.has(host) && hostname.endsWith(`.${host}`))
+    );
 }
 
 async function readHtml(response, maxBytes = MAX_HTML_BYTES, truncateAtLimit = false) {
@@ -102,10 +115,12 @@ function decodeCandidate(value) {
     .replace(/&#38;?/g, '&')
     .replace(/\\u0026/gi, '&')
     .replace(/\\\//g, '/');
-  try {
-    decoded = decodeURIComponent(decoded);
-  } catch {
-    // Keep the candidate unchanged if it contains malformed percent-encoding.
+  if (/^https?%3A%2F%2F/i.test(decoded)) {
+    try {
+      decoded = decodeURIComponent(decoded);
+    } catch {
+      // Keep the candidate unchanged if it contains malformed percent-encoding.
+    }
   }
   return decoded;
 }

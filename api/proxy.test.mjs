@@ -143,6 +143,83 @@ test('resolves amzlink.to and amzlink.com short links through the proxy', async 
   }
 });
 
+test('resolves amzn.divulgador.link and preserves encoded Amazon query characters', async () => {
+  const originalFetch = globalThis.fetch;
+  const shortUrl =
+    'https://amzn.divulgador.link/offer?target=https%3A%2F%2Famazon.com.br%2Fdp%2FB0ABCDEFGH%3Fref%3Dsocial%26x%3D1&campaign=caf%C3%A9%20%26%20frete';
+  const destinationUrl =
+    'https://www.amazon.com.br/dp/B0ABCDEFGH?ref_=share%20link&campaign=caf%C3%A9%20%26%20livros&note=tea%2Bcoffee';
+  const encodedDestinationForHtml = destinationUrl.replaceAll('&', '&amp;');
+  const requestedUrls = [];
+  globalThis.fetch = async (input) => {
+    const requestUrl = new URL(String(input));
+    requestedUrls.push(requestUrl);
+    assert.equal(requestUrl.hostname, 'amzn.divulgador.link');
+    assert.equal(requestUrl.searchParams.get('target'),
+      'https://amazon.com.br/dp/B0ABCDEFGH?ref=social&x=1');
+    return new Response(
+      `<meta property="og:url" content="${encodedDestinationForHtml}">`,
+      { status: 200, headers: { 'content-type': 'text/html' } }
+    );
+  };
+  let responseStatus = 0;
+  let payload;
+  const res = {
+    setHeader() {},
+    status(code) {
+      responseStatus = code;
+      return this;
+    },
+    json(value) {
+      payload = value;
+      return this;
+    },
+    end() {
+      return this;
+    }
+  };
+
+  try {
+    await handler({ method: 'GET', query: { url: shortUrl } }, res);
+    assert.equal(responseStatus, 200);
+    assert.equal(payload.debug_url, destinationUrl);
+    assert.equal(requestedUrls.length, 1);
+    assert.equal(requestedUrls[0].toString(), new URL(shortUrl).toString());
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('rejects subdomains of the exact amzn.divulgador.link alias', async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return new Response('unexpected');
+  };
+  let responseStatus = 0;
+  const res = {
+    setHeader() {},
+    status(code) {
+      responseStatus = code;
+      return this;
+    },
+    json() {
+      return this;
+    }
+  };
+  try {
+    await handler({
+      method: 'GET',
+      query: { url: 'https://offers.amzn.divulgador.link/example' }
+    }, res);
+    assert.equal(responseStatus, 400);
+    assert.equal(fetchCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('extracts Magalu product URLs from og:url, canonical, and product links', () => {
   const expected = 'https://www.magazineluiza.com.br/p/produto/123';
   assert.equal(
