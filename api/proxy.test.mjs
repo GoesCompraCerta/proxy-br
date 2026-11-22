@@ -9,6 +9,234 @@ import handler, {
 const productUrl =
   'https://shopee.com.br/opaanlp/402093902/23793620725?__mobile__=1&x=1';
 
+function createResponseRecorder() {
+  return {
+    headers: {},
+    statusCode: undefined,
+    payload: undefined,
+    setHeader(name, value) {
+      this.headers[name.toLowerCase()] = value;
+      return this;
+    },
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(value) {
+      this.payload = value;
+      return this;
+    },
+    end() {
+      return this;
+    }
+  };
+}
+
+async function withProxySecret(value, run) {
+  const previous = process.env.PROXY_SECRET;
+  if (value === undefined) delete process.env.PROXY_SECRET;
+  else process.env.PROXY_SECRET = value;
+  try {
+    await run();
+  } finally {
+    if (previous === undefined) delete process.env.PROXY_SECRET;
+    else process.env.PROXY_SECRET = previous;
+  }
+}
+
+test('authenticated Mercado Livre proxy rejects missing or invalid shared secret', async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return new Response('unexpected');
+  };
+  try {
+    await withProxySecret(undefined, async () => {
+      const unconfiguredResponse = createResponseRecorder();
+      await handler({
+        method: 'POST',
+        headers: {},
+        body: {
+          url: 'https://www.mercadolivre.com.br/affiliate-program/api/v2/affiliates/linkbuilder',
+          method: 'GET'
+        }
+      }, unconfiguredResponse);
+      assert.equal(unconfiguredResponse.statusCode, 503);
+    });
+
+    await withProxySecret('expected-secret', async () => {
+      const missingSecretResponse = createResponseRecorder();
+      await handler({
+        method: 'POST',
+        headers: {},
+        body: {
+          url: 'https://www.mercadolivre.com.br/affiliate-program/api/v2/affiliates/linkbuilder',
+          method: 'GET'
+        }
+      }, missingSecretResponse);
+      assert.equal(missingSecretResponse.statusCode, 401);
+      assert.deepEqual(missingSecretResponse.payload, { error: 'unauthorized' });
+
+      const wrongSecretResponse = createResponseRecorder();
+      await handler({
+        method: 'POST',
+        headers: { 'x-proxy-secret': 'wrong-secret' },
+        body: {
+          url: 'https://www.mercadolivre.com.br/affiliate-program/api/v2/affiliates/linkbuilder',
+          method: 'GET'
+        }
+      }, wrongSecretResponse);
+      assert.equal(wrongSecretResponse.statusCode, 401);
+      assert.equal(fetchCalls, 0);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('authenticated Mercado Livre proxy validates target hosts and HTTP methods', async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return new Response('unexpected');
+  };
+  try {
+    await withProxySecret('test-secret', async () => {
+      for (const payload of [
+        {
+          url: 'https://mercadolivre.com.br.attacker.example/affiliate',
+          method: 'GET'
+        },
+        {
+          url: 'https://api.mercadolibre.com/sites/MLB/search',
+          method: 'GET'
+        },
+        {
+          url: 'https://www.mercadolivre.com.br/affiliate',
+          method: 'PUT'
+        }
+      ]) {
+        const res = createResponseRecorder();
+        await handler({
+          method: 'POST',
+          headers: { 'x-proxy-secret': 'test-secret' },
+          body: payload
+        }, res);
+        assert.equal(res.statusCode, 400);
+      }
+      assert.equal(fetchCalls, 0);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('authenticated Mercado Livre proxy forwards GET headers and returns status, Set-Cookie, and body', async () => {
+  const originalFetch = globalThis.fetch;
+  let upstreamRequest;
+  globalThis.fetch = async (input, init) => {
+    upstreamRequest = { url: String(input), init };
+    return new Response('<meta name="csrf-token" content="csrf-value">', {
+      status: 200,
+      headers: {
+        'content-type': 'text/html',
+        'set-cookie': 'sid=refreshed; Path=/; HttpOnly'
+      }
+    });
+  };
+  try {
+    await withProxySecret('test-secret', async () => {
+      const res = createResponseRecorder();
+      await handler({
+        method: 'POST',
+        headers: { 'x-proxy-secret': 'test-secret' },
+        body: {
+          url: 'https://www.mercadolivre.com.br/affiliate-program/api/v2/affiliates/linkbuilder',
+          method: 'GET',
+          headers: {
+            cookie: 'ssid=session-cookie',
+            accept: 'text/html,application/json',
+            'user-agent': 'test-agent',
+            ignored: 'must-not-forward'
+          }
+        }
+      }, res);
+
+      assert.equal(res.statusCode, 200);
+      assert.equal(upstreamRequest.url,
+        'https://www.mercadolivre.com.br/affiliate-program/api/v2/affiliates/linkbuilder');
+      assert.equal(upstreamRequest.init.method, 'GET');
+      assert.equal(upstreamRequest.init.redirect, 'manual');
+      assert.deepEqual(Object.fromEntries(new Headers(upstreamRequest.init.headers)), {
+        accept: 'text/html,application/json',
+        cookie: 'ssid=session-cookie',
+        'user-agent': 'test-agent'
+      });
+      assert.equal(res.payload.status, 200);
+      assert.match(res.payload.body, /csrf-value/);
+      assert.deepEqual(res.payload.setCookie, ['sid=refreshed; Path=/; HttpOnly']);
+      assert.equal(res.payload.headers['content-type'], 'text/html');
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('authenticated Mercado Livre proxy forwards createLink POST and preserves upstream error status', async () => {
+  const originalFetch = globalThis.fetch;
+  let upstreamRequest;
+  globalThis.fetch = async (input, init) => {
+    upstreamRequest = { url: String(input), init };
+    return new Response('forbidden', {
+      status: 403,
+      headers: { 'content-type': 'text/plain', 'x-csrf-token': 'next-csrf' }
+    });
+  };
+  try {
+    await withProxySecret('test-secret', async () => {
+      const body = JSON.stringify({
+        urls: ['https://www.mercadolivre.com.br/p/MLB123456'],
+        tag: 'affiliate-tag'
+      });
+      const res = createResponseRecorder();
+      await handler({
+        method: 'POST',
+        headers: { 'x-proxy-secret': 'test-secret' },
+        body: {
+          url: 'https://www.mercadolivre.com.br/affiliate-program/api/v2/affiliates/createLink',
+          method: 'POST',
+          headers: {
+            cookie: 'ssid=session-cookie; sid=refreshed',
+            'x-csrf-token': 'csrf-value',
+            'user-agent': 'test-agent',
+            origin: 'https://www.mercadolivre.com.br',
+            referer: 'https://www.mercadolivre.com.br/affiliate-program/',
+            accept: 'application/json',
+            'content-type': 'application/json'
+          },
+          body
+        }
+      }, res);
+
+      assert.equal(res.statusCode, 200);
+      assert.equal(upstreamRequest.init.method, 'POST');
+      assert.equal(upstreamRequest.init.body, body);
+      const headers = new Headers(upstreamRequest.init.headers);
+      assert.equal(headers.get('cookie'), 'ssid=session-cookie; sid=refreshed');
+      assert.equal(headers.get('x-csrf-token'), 'csrf-value');
+      assert.equal(headers.get('origin'), 'https://www.mercadolivre.com.br');
+      assert.equal(res.payload.status, 403);
+      assert.equal(res.payload.body, 'forbidden');
+      assert.equal(res.payload.headers['x-csrf-token'], 'next-csrf');
+      assert.deepEqual(res.payload.setCookie, []);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 const fixtures = [
   [
     'CONFIG.httpUrl escaped in JavaScript',

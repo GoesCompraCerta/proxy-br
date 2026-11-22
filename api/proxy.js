@@ -1,3 +1,5 @@
+import { timingSafeEqual } from 'node:crypto';
+
 const ALLOWED_HOSTS = [
   'shopee.com.br',
   'shopee.com',
@@ -56,6 +58,131 @@ const MAGALU_PRODUCT_HOSTS = new Set([
 const REQUEST_TIMEOUT_MS = 8_000;
 const USER_AGENT =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1';
+const MERCADO_LIVRE_PROXY_HOSTS = ['mercadolivre.com.br', 'mercadolivre.com'];
+const MERCADO_LIVRE_PROXY_REQUEST_HEADERS = [
+  'cookie',
+  'x-csrf-token',
+  'user-agent',
+  'origin',
+  'referer',
+  'accept',
+  'content-type'
+];
+const MERCADO_LIVRE_PROXY_RESPONSE_HEADERS = [
+  'content-type',
+  'location',
+  'x-csrf-token',
+  'csrf-token'
+];
+const MERCADO_LIVRE_PROXY_TIMEOUT_MS = 12_000;
+
+function isMercadoLivreProxyTarget(value) {
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase();
+    return url.protocol === 'https:' &&
+      (url.port === '' || url.port === '443') &&
+      !url.username &&
+      !url.password &&
+      MERCADO_LIVRE_PROXY_HOSTS.some((domain) =>
+        hostname === domain || hostname.endsWith(`.${domain}`)
+      );
+  } catch {
+    return false;
+  }
+}
+
+function matchesProxySecret(expected, supplied) {
+  if (typeof expected !== 'string' || typeof supplied !== 'string') return false;
+  const expectedBuffer = Buffer.from(expected);
+  const suppliedBuffer = Buffer.from(supplied);
+  return expectedBuffer.length === suppliedBuffer.length &&
+    timingSafeEqual(expectedBuffer, suppliedBuffer);
+}
+
+function parseMercadoLivreProxyBody(body) {
+  if (typeof body !== 'string') return body;
+  try {
+    return JSON.parse(body);
+  } catch {
+    return null;
+  }
+}
+
+async function handleMercadoLivreProxy(req, res) {
+  const expectedSecret = process.env.PROXY_SECRET;
+  if (!expectedSecret) {
+    return res.status(503).json({ error: 'proxy authentication is not configured' });
+  }
+  if (!matchesProxySecret(expectedSecret, req.headers?.['x-proxy-secret'])) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+
+  const payload = parseMercadoLivreProxyBody(req.body);
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return res.status(400).json({ error: 'invalid request body' });
+  }
+
+  const targetMethod = typeof payload.method === 'string'
+    ? payload.method.toUpperCase()
+    : '';
+  if (
+    !isMercadoLivreProxyTarget(payload.url) ||
+    !['GET', 'POST'].includes(targetMethod) ||
+    (payload.body !== undefined && typeof payload.body !== 'string') ||
+    (targetMethod === 'GET' && payload.body !== undefined)
+  ) {
+    return res.status(400).json({ error: 'invalid Mercado Livre proxy request' });
+  }
+
+  const targetHeaders = {};
+  if (payload.headers && typeof payload.headers === 'object' && !Array.isArray(payload.headers)) {
+    for (const [name, value] of Object.entries(payload.headers)) {
+      const normalizedName = name.toLowerCase();
+      if (
+        MERCADO_LIVRE_PROXY_REQUEST_HEADERS.includes(normalizedName) &&
+        typeof value === 'string'
+      ) {
+        targetHeaders[normalizedName] = value;
+      }
+    }
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), MERCADO_LIVRE_PROXY_TIMEOUT_MS);
+  try {
+    const upstream = await fetch(payload.url, {
+      method: targetMethod,
+      headers: targetHeaders,
+      ...(payload.body === undefined ? {} : { body: payload.body }),
+      redirect: 'manual',
+      signal: controller.signal
+    });
+    const responseHeaders = {};
+    for (const name of MERCADO_LIVRE_PROXY_RESPONSE_HEADERS) {
+      const value = upstream.headers.get(name);
+      if (value) responseHeaders[name] = value;
+    }
+    const extendedHeaders = upstream.headers;
+    const setCookie = typeof extendedHeaders.getSetCookie === 'function'
+      ? extendedHeaders.getSetCookie()
+      : (upstream.headers.get('set-cookie') ?? '')
+          .split(/,(?=\s*[^;,=\s]+=[^;,]*)/)
+          .filter(Boolean);
+
+    return res.status(200).json({
+      status: upstream.status,
+      headers: responseHeaders,
+      setCookie,
+      body: await upstream.text()
+    });
+  } catch (error) {
+    const status = error instanceof Error && error.name === 'AbortError' ? 504 : 502;
+    return res.status(status).json({ error: 'Mercado Livre upstream request failed' });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 function isAllowedShopeeUrl(value) {
   let url;
@@ -356,12 +483,13 @@ export const config = { regions: ['gru1'] };
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Proxy-Secret');
 
   if (req.method === 'OPTIONS') return res.status(204).end();
+  if (req.method === 'POST') return handleMercadoLivreProxy(req, res);
   if (req.method !== 'GET') {
-    res.setHeader('Allow', 'GET, OPTIONS');
+    res.setHeader('Allow', 'GET, POST, OPTIONS');
     return res.status(405).json({ error: 'method not allowed' });
   }
 
